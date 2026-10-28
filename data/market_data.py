@@ -43,6 +43,7 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AI-Trader/1.0", "Acce
 # live_ok: reliable enough to place REAL-money orders against (unofficial public feeds are not)
 SOURCES = {
     "truedata": {"label": "TrueData (paid: futures, options, ticks)", "has_option_prices": True, "live_ok": True},
+    "kite": {"label": "Zerodha Kite Connect (your account: futures, options, live ticks)", "has_option_prices": True, "live_ok": True},
     "public": {"label": "Free public: Yahoo index + NSE option chain", "has_option_prices": True, "live_ok": False},
     "yahoo": {"label": "Free: Yahoo index candles only", "has_option_prices": False, "live_ok": False},
 }

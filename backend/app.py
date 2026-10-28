@@ -114,6 +114,10 @@ def _live_broker_ready() -> tuple[bool, str]:
     if order_manager.is_halted:
         return False, f"Trading halted: {order_manager.halt_reason}"
     from data import market_data as md
+    if md.get_source() == "kite":
+        from data import kite_data
+        if not kite_data.instance().feed_fresh():
+            return False, "Kite live price feed is not delivering ticks (stop-loss cannot be monitored). Check Settings → Market data."
     if not md.live_orders_ok():
         return False, ("Live orders are disabled with the free public market-data sources: they are unofficial, "
                        "delayed/rate-limited and cannot be trusted to monitor a real stop-loss. "
@@ -2238,6 +2242,9 @@ def _ensure_collector():
     if md.get_source() in md.FREE_SOURCES:
         _ensure_free_feed()
         return
+    if md.get_source() == "kite":
+        _ensure_kite_feed()
+        return
     from config.settings import TRUEDATA_USER, TRUEDATA_PASSWORD
     if not (TRUEDATA_USER and TRUEDATA_PASSWORD):
         global _warned_no_truedata
@@ -2352,9 +2359,11 @@ def _market_data_status() -> dict:
     except Exception as e:
         st["db_error"] = str(e).splitlines()[0][:200]
     cfg = user_config.get("market_data")
-    from data import nse_feed
+    from data import nse_feed, kite_data
+    z = user_config.get("zerodha")
     st.update(last_sync=cfg.get("last_sync"), feed_running=bool(_free_feed_thread and _free_feed_thread.is_alive()),
-              nse=nse_feed.FEED_STATE)
+              nse=nse_feed.FEED_STATE, kite=dict(kite_data.STATE, logged_in=bool(z.get("access_token")),
+                                                 has_key=bool(z.get("api_key"))))
     return st
 
 
@@ -2384,9 +2393,52 @@ def api_data_config_set():
         restart_needed = restart_needed or body["source"] == "truedata"
     if md.get_source() in md.FREE_SOURCES and _is_market_hours():
         _ensure_free_feed()
+    if md.get_source() == "kite" and _is_market_hours():
+        _ensure_kite_feed()
     resp = api_data_config_get().get_json()
     resp["restart_needed"] = restart_needed
     return jsonify(resp)
+
+
+_warned_kite = None
+
+
+def _ensure_kite_feed():
+    """Start the Kite WebSocket feed (inside this process) during market hours."""
+    global _warned_kite
+    from data import kite_data
+    kd = kite_data.instance()
+    if kd.up_to_date():
+        return
+    try:
+        kd.stop_feed()
+        kd.start_feed()
+        _warned_kite = None
+    except kite_data.KiteDataError as e:
+        if _warned_kite != str(e):                     # log each distinct problem once
+            logger.warning(f"Kite feed not started: {e}")
+            _warned_kite = str(e)
+        kite_data.STATE["error"] = str(e)
+
+
+@app.route("/api/data/test_kite", methods=["POST"])
+def api_data_test_kite():
+    from data import kite_data
+    return jsonify(kite_data.instance().test())
+
+
+@app.route("/api/data/kite_sync", methods=["POST"])
+def api_data_kite_sync():
+    from data import kite_data
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        res = kite_data.instance().sync_history(int(body.get("days", 30)))
+        return jsonify({"ok": True, **res, "status": _market_data_status()})
+    except kite_data.KiteDataError as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    except Exception as e:
+        logger.exception("kite sync failed")
+        return jsonify({"ok": False, "error": str(e).splitlines()[0][:300]}), 500
 
 
 @app.route("/api/data/test_nse", methods=["POST"])
