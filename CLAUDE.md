@@ -79,6 +79,11 @@ cd /Users/aaryansinha/Dev/Projects/ai-trader
 source .venv/bin/activate
 ```
 
+### One-click start (WSL / Linux)
+```bash
+./start.sh     # DB + backend (+ collector in market hours) + dashboard; Ctrl+C stops all
+```
+
 ### Backend (Flask API)
 ```bash
 python backend/app.py              # http://localhost:5050
