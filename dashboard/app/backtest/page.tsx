@@ -35,6 +35,7 @@ export default function BacktestPage() {
   const [selectedRisk, setSelectedRisk] = useState<RiskLevel>("medium");
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState<BacktestProgress | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
   const termRef = useRef<HTMLDivElement>(null);
 
   // Date range
@@ -90,6 +91,7 @@ export default function BacktestPage() {
   }, [load]);
 
   const runBacktest = async (risk: RiskLevel) => {
+    setStartError(null);
     try {
       const body: Record<string, string> = { risk };
       if (startDate) body.start_date = startDate;
@@ -98,8 +100,10 @@ export default function BacktestPage() {
       if (res.error) {
         setProgress(prev => prev ? { ...prev, output_lines: [...(prev.output_lines || []), `ERROR: ${res.error}`] } : null);
       }
-    } catch {
-      // Will be picked up by progress polling
+    } catch (e) {
+      // The backend refuses to start (e.g. no tick data) with a human-readable reason — show it.
+      const msg = e instanceof Error ? e.message : "Could not start the backtest";
+      setStartError(msg);
     }
   };
 
@@ -209,6 +213,13 @@ export default function BacktestPage() {
         </div>
 
         {/* Backtest progress terminal */}
+        {startError && (
+          <div className="mb-4 p-4 text-[11px]" style={{ border: "1px solid #ff3e3e", background: "#1a0d0d", color: "#c8cdd5" }}>
+            <p className="font-bold mb-1" style={{ color: "#ff3e3e" }}>BACKTEST NOT STARTED</p>
+            <p>{startError}</p>
+          </div>
+        )}
+
         {progress && progress.status !== "idle" && (
           <div className="t-panel mb-5" style={{
             borderColor: isRunning ? '#e8c300' : progress.status === "done" ? '#00e87b' : '#ff3e3e',

@@ -14,6 +14,7 @@ Usage:
   python scripts/tick_replay_backtest.py 2026-03-10 2026-03-11  # specific days
 """
 
+import sys
 import os, sys, argparse, json
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -1277,6 +1278,13 @@ def main():
         replay_dates = get_available_days()
 
     print(f"  Days to replay:  {len(replay_dates)}")
+    if not replay_dates:
+        print("\nNOTHING TO REPLAY: tick_data has no day with enough NIFTY-I ticks (need > 500 per day).")
+        print("This backtest replays per-tick history (futures + option premiums). Only a tick-level feed such as")
+        print("TrueData provides that; the free sources (Yahoo / NSE) store 1-minute candles only.")
+        print("Load tick history first (python scripts/fetch_missing_ticks.py --dates YYYY-MM-DD --symbol NIFTY-I),")
+        print("or restore a database backup (scripts/restore_from_backup.py).")
+        sys.exit(2)
     for d in replay_dates:
         print(f"    {d}")
 

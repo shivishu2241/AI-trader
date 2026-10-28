@@ -3026,6 +3026,21 @@ def api_backtest_run():
     if backtest_progress["running"]:
         return jsonify({"error": "A backtest is already running", "risk": backtest_progress["risk"]}), 409
 
+    # The tick-replay engine needs per-tick history; fail fast with an explanation instead of a traceback.
+    try:
+        tick_days = read_sql(
+            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM tick_data WHERE symbol = 'NIFTY-I' "
+            "GROUP BY timestamp::date HAVING COUNT(*) > 500) t"
+        ).iloc[0]["n"]
+    except Exception as e:
+        return jsonify({"error": f"Database not ready: {str(e).splitlines()[0][:160]}"}), 409
+    if tick_days == 0:
+        return jsonify({"error": (
+            "No tick data to replay. The tick-replay backtest needs per-tick history (futures + option premiums), "
+            "which only a tick feed like TrueData provides; the free sources (Yahoo/NSE) store 1-minute candles only. "
+            "Load tick history (scripts/fetch_missing_ticks.py) or restore a database backup, then try again."
+        )}), 409
+
     def _run():
         global backtest_progress
         import subprocess
