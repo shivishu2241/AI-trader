@@ -52,6 +52,14 @@ then
   ./scripts/setup_db.sh || echo "  (database setup failed — see messages above; the dashboard will run without data)"
 fi
 
+# 3c. Make sure the tables exist (init_db is idempotent)
+python - <<'PY' 2>/dev/null || { echo "Creating database tables..."; python -c "from database.db import init_db; init_db()"; }
+from sqlalchemy import text
+from database.db import engine
+with engine.connect() as c:
+    assert c.execute(text("select to_regclass('public.minute_candles')")).scalar() is not None
+PY
+
 # 4. Backend
 echo "Starting backend  → http://localhost:5050   (log: logs/backend.log)"
 python backend/app.py >> logs/backend.log 2>&1 &

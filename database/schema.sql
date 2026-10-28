@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS minute_candles (
 
 SELECT create_hypertable('minute_candles', 'timestamp', if_not_exists => TRUE);
 
+-- Required by upsert_candles() (ON CONFLICT (timestamp, symbol))
+CREATE UNIQUE INDEX IF NOT EXISTS uq_minute_ts_symbol ON minute_candles (timestamp, symbol);
+
 CREATE INDEX IF NOT EXISTS idx_minute_symbol_ts ON minute_candles (symbol, timestamp DESC);
 
 -- ── 5-Minute Candles (regime detection timeframe) ────────────────────────────

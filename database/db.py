@@ -52,19 +52,47 @@ def upsert_candles(df: pd.DataFrame, table: str = "minute_candles"):
     return inserted
 
 
+def _sql_statements(sql: str) -> list[str]:
+    """Split a schema file into executable statements (drops comment-only chunks)."""
+    out = []
+    for chunk in sql.split(";"):
+        body = "\n".join(l for l in chunk.splitlines() if not l.strip().startswith("--")).strip()
+        if body:
+            out.append(body)
+    return out
+
+
 def init_db():
-    """Run the schema.sql to initialize all tables and hypertables."""
+    """
+    Run schema.sql to create all tables (and hypertables when TimescaleDB is installed).
+
+    Every statement runs in its OWN transaction: one failing statement (e.g. the TimescaleDB
+    extension not being installed) must not abort the rest, otherwise no tables get created.
+    Without TimescaleDB the tables are plain PostgreSQL tables and everything still works.
+    """
     import os
     schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
     with open(schema_path, "r") as f:
-        sql = f.read()
-    with engine.connect() as conn:
-        for statement in sql.split(";"):
-            stmt = statement.strip()
-            if stmt:
-                try:
-                    conn.execute(text(stmt))
-                except Exception as e:
-                    logger.warning(f"Schema statement skipped: {e}")
-        conn.commit()
-    logger.info("Database schema initialized.")
+        statements = _sql_statements(f.read())
+
+    timescale_missing = False
+    failed = 0
+    for stmt in statements:
+        is_ts = "timescaledb" in stmt.lower() or "create_hypertable" in stmt.lower()
+        if is_ts and timescale_missing:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+        except Exception as e:
+            if is_ts:
+                timescale_missing = True
+                logger.warning("TimescaleDB not available — using plain PostgreSQL tables "
+                               "(install timescaledb for hypertable performance).")
+            else:
+                failed += 1
+                logger.error(f"Schema statement failed: {str(e).splitlines()[0]} | {stmt[:80]!r}")
+    if failed:
+        logger.error(f"Database schema initialised with {failed} error(s).")
+    else:
+        logger.info("Database schema initialized.")
