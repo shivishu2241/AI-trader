@@ -39,10 +39,14 @@ LIVE_CACHE_FILE = "/tmp/td_live_prices.json"
 IST = timezone(timedelta(hours=5, minutes=30))
 _HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AI-Trader/1.0", "Accept": "application/json"}
 
+# has_option_prices: option premiums available (paper-trading features, entry prices, SL monitoring)
+# live_ok: reliable enough to place REAL-money orders against (unofficial public feeds are not)
 SOURCES = {
-    "truedata": {"label": "TrueData (paid feed: futures, options, ticks)", "has_option_prices": True},
-    "yahoo": {"label": "Free: Yahoo Finance (NIFTY index candles only)", "has_option_prices": False},
+    "truedata": {"label": "TrueData (paid: futures, options, ticks)", "has_option_prices": True, "live_ok": True},
+    "public": {"label": "Free public: Yahoo index + NSE option chain", "has_option_prices": True, "live_ok": False},
+    "yahoo": {"label": "Free: Yahoo index candles only", "has_option_prices": False, "live_ok": False},
 }
+FREE_SOURCES = ("public", "yahoo")
 
 
 # ── Source selection ──────────────────────────────────────────────────
@@ -61,6 +65,10 @@ def get_source() -> str:
 
 def has_option_prices() -> bool:
     return SOURCES[get_source()]["has_option_prices"]
+
+
+def live_orders_ok() -> bool:
+    return SOURCES[get_source()]["live_ok"]
 
 
 # ── Yahoo fetch / parse ───────────────────────────────────────────────
@@ -163,6 +171,10 @@ def latest_price() -> Optional[float]:
 
 
 def write_live_price(price: float) -> None:
+    write_live_prices({DB_SYMBOL: price})
+
+
+def write_live_prices(prices: dict) -> None:
     """Same file/format collect_ticks.py writes, so the dashboard & tick monitor keep working."""
     cache = {}
     try:
@@ -170,7 +182,9 @@ def write_live_price(price: float) -> None:
             cache = json.load(f)
     except Exception:
         pass
-    cache[DB_SYMBOL] = {"price": price, "ts": datetime.now().isoformat()}
+    now = datetime.now().isoformat()
+    for sym, price in prices.items():
+        cache[sym] = {"price": float(price), "ts": now}
     tmp = LIVE_CACHE_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(cache, f)

@@ -114,9 +114,10 @@ def _live_broker_ready() -> tuple[bool, str]:
     if order_manager.is_halted:
         return False, f"Trading halted: {order_manager.halt_reason}"
     from data import market_data as md
-    if not md.has_option_prices():
-        return False, ("Live orders are disabled with the free market-data source: it has no option prices, "
-                       "so stop-loss/target cannot be monitored. Use a real option feed (TrueData) for live trading.")
+    if not md.live_orders_ok():
+        return False, ("Live orders are disabled with the free public market-data sources: they are unofficial, "
+                       "delayed/rate-limited and cannot be trusted to monitor a real stop-loss. "
+                       "Use a licensed option feed (TrueData) for live trading.")
     return True, ""
 
 
@@ -2220,7 +2221,7 @@ def _ensure_collector():
 
     # Market-data source (Settings → Market data): the free source has no tick collector.
     from data import market_data as md
-    if md.get_source() == "yahoo":
+    if md.get_source() in md.FREE_SOURCES:
         _ensure_free_feed()
         return
     from config.settings import TRUEDATA_USER, TRUEDATA_PASSWORD
@@ -2262,23 +2263,32 @@ _free_feed_thread = None
 
 
 def _free_feed_loop():
-    """Free-source live feed: index price into the shared cache every 15s, candles every 60s."""
+    """Free-source live feed. yahoo: index price/candles. public: + NSE option chain (premiums)."""
     from data import market_data as md
-    last_sync = 0.0
+    from data import nse_feed
+    last_sync = last_nse = 0.0
     while True:
         try:
-            if md.get_source() != "yahoo":
+            src = md.get_source()
+            if src not in md.FREE_SOURCES:
                 return                       # user switched source — let the thread end
             if _is_market_hours() and datetime.now().weekday() < 5:
-                price = md.latest_price()
-                if price:
-                    md.write_live_price(price)
+                if src == "public" and time.time() - last_nse >= 30:
+                    last_nse = time.time()
+                    try:
+                        nse_feed.poll_once()
+                    except Exception as e:
+                        logger.warning(f"NSE feed: {e}")
+                if src == "yahoo":
+                    price = md.latest_price()
+                    if price:
+                        md.write_live_price(price)
                 if time.time() - last_sync >= 60:
-                    md.sync_candles(days=1)
                     last_sync = time.time()
+                    md.sync_candles(days=1)
         except Exception as e:
             logger.warning(f"Free feed error: {e}")
-        time.sleep(15)
+        time.sleep(5)
 
 
 def _ensure_free_feed():
@@ -2302,7 +2312,9 @@ def _market_data_status() -> dict:
     except Exception as e:
         st["db_error"] = str(e).splitlines()[0][:200]
     cfg = user_config.get("market_data")
-    st.update(last_sync=cfg.get("last_sync"), feed_running=bool(_free_feed_thread and _free_feed_thread.is_alive()))
+    from data import nse_feed
+    st.update(last_sync=cfg.get("last_sync"), feed_running=bool(_free_feed_thread and _free_feed_thread.is_alive()),
+              nse=nse_feed.FEED_STATE)
     return st
 
 
@@ -2330,11 +2342,18 @@ def api_data_config_set():
     if body.get("source") in md.SOURCES:
         user_config.update("market_data", {"source": body["source"]})
         restart_needed = restart_needed or body["source"] == "truedata"
-    if md.get_source() == "yahoo" and _is_market_hours():
+    if md.get_source() in md.FREE_SOURCES and _is_market_hours():
         _ensure_free_feed()
     resp = api_data_config_get().get_json()
     resp["restart_needed"] = restart_needed
     return jsonify(resp)
+
+
+@app.route("/api/data/test_nse", methods=["POST"])
+def api_data_test_nse():
+    """One-off check that the NSE option-chain endpoint is reachable from this machine (writes nothing)."""
+    from data import nse_feed
+    return jsonify(nse_feed.test())
 
 
 @app.route("/api/data/sync", methods=["POST"])
