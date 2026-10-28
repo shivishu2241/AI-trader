@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback } from "react";
 import Sidebar from "@/components/Sidebar";
 import RiskProfileCard from "@/components/RiskProfileCard";
+import LlmSettings from "@/components/LlmSettings";
+import BrokerSettings from "@/components/BrokerSettings";
 import { fetchJSON, postJSON, type RiskProfile } from "@/lib/api";
 import { Play } from "lucide-react";
 
@@ -80,6 +82,9 @@ export default function SettingsPage() {
             )}
           </div>
         </div>
+
+        <BrokerSettings />
+        <LlmSettings />
 
         {/* System info */}
         <div className="t-panel p-5 mb-4">

@@ -3214,6 +3214,215 @@ def api_broker_exit():
     return jsonify(result)
 
 
+
+# ── GUI configuration: broker credentials ───────────────────────────────────
+
+from utils import user_config
+from flask import redirect
+
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:3000")
+
+
+def _broker_config_payload() -> dict:
+    from broker.indmoney_adapter import DEFAULT_BASE_URL, DEFAULT_ENDPOINTS
+    z = user_config.masked("zerodha")
+    i = user_config.masked("indmoney")
+    z_raw = user_config.get("zerodha")
+    return {
+        "mode": order_manager.mode,
+        "status": order_manager.to_dict(),
+        "zerodha": {
+            "api_key": z.get("api_key", ""),
+            "api_secret": z.get("api_secret", ""),
+            "has_access_token": bool(z_raw.get("access_token")),
+            "redirect_url": request.host_url.rstrip("/") + "/api/broker/zerodha/callback",
+        },
+        "indmoney": {
+            "access_token": i.get("access_token", ""),
+            "base_url": i.get("base_url") or DEFAULT_BASE_URL,
+            "auth_scheme": i.get("auth_scheme", "auto"),
+            "endpoints": {**DEFAULT_ENDPOINTS, **i.get("endpoints", {})},
+            "default_endpoints": DEFAULT_ENDPOINTS,
+        },
+    }
+
+
+@app.route("/api/broker/config", methods=["GET"])
+def api_broker_config_get():
+    return jsonify(_broker_config_payload())
+
+
+@app.route("/api/broker/config", methods=["POST"])
+def api_broker_config_set():
+    """Save broker credentials and/or switch the active broker from the GUI."""
+    body = request.get_json(force=True, silent=True) or {}
+    for name in ("zerodha", "indmoney"):
+        if isinstance(body.get(name), dict):
+            user_config.update(name, body[name])
+    mode = body.get("mode")
+    if mode and mode != order_manager.mode:
+        if mode != "paper" and not body.get("confirm_live"):
+            return jsonify({"error": "Switching to a live broker requires confirm_live=true"}), 400
+        res = order_manager.set_mode(mode)
+        if not res.get("ok"):
+            return jsonify(res), 409
+    return jsonify(_broker_config_payload())
+
+
+@app.route("/api/broker/test", methods=["POST"])
+def api_broker_test():
+    """Check credentials with a read-only call. Does not switch brokers or place orders."""
+    from broker.zerodha_adapter import ZerodhaAdapter
+    from broker.indmoney_adapter import IndMoneyAdapter
+    body = request.get_json(force=True, silent=True) or {}
+    name = body.get("broker", order_manager.mode)
+    if name == "paper":
+        return jsonify({"ok": True, "broker": "Paper", "message": "Paper trading needs no credentials"})
+    adapter = ZerodhaAdapter() if name == "zerodha" else IndMoneyAdapter() if name == "indmoney" else None
+    if adapter is None:
+        return jsonify({"ok": False, "message": f"Unknown broker {name}"}), 400
+    try:
+        ok = adapter.authenticate()
+    except Exception as e:
+        logger.exception("broker test failed")
+        return jsonify({"ok": False, "broker": name, "message": str(e)})
+    if not ok:
+        hint = ("Open the Zerodha login flow to get a fresh daily access token."
+                if name == "zerodha" else "Check the access token, static IP whitelist and endpoints.")
+        return jsonify({"ok": False, "broker": name, "message": f"Authentication failed. {hint}"})
+    funds = adapter.get_margins()
+    return jsonify({"ok": True, "broker": adapter.broker_name, "message": "Connected", "funds": funds})
+
+
+@app.route("/api/broker/zerodha/login_url")
+def api_zerodha_login_url():
+    from broker.zerodha_adapter import ZerodhaAdapter
+    url = ZerodhaAdapter().generate_login_url()
+    if not url:
+        return jsonify({"error": "Save your Zerodha API key first (and `pip install kiteconnect`)."}), 400
+    return jsonify({"login_url": url})
+
+
+@app.route("/api/broker/zerodha/callback")
+def api_zerodha_callback():
+    """Redirect target registered in the Kite developer console."""
+    from broker.zerodha_adapter import ZerodhaAdapter
+    token = request.args.get("request_token", "")
+    ok = bool(token) and request.args.get("status", "success") == "success" \
+        and ZerodhaAdapter().complete_auth(token)
+    if ok and order_manager.mode == "zerodha":
+        order_manager.connect()
+    return redirect(f"{DASHBOARD_URL}/settings?broker=zerodha&auth={'ok' if ok else 'failed'}")
+
+
+# ── GUI configuration: LLM providers + AI chat ──────────────────────────────
+
+from llm import client as llm
+
+
+@app.route("/api/llm/config", methods=["GET"])
+def api_llm_config_get():
+    return jsonify(llm.public_config())
+
+
+@app.route("/api/llm/config", methods=["POST"])
+def api_llm_config_set():
+    """body: {active?: provider_id, providers?: {id: {api_key?, base_url?, model?}}}"""
+    body = request.get_json(force=True, silent=True) or {}
+    patch = {}
+    if body.get("active") in llm.PROVIDERS:
+        patch["active"] = body["active"]
+    if isinstance(body.get("providers"), dict):
+        patch["providers"] = {k: v for k, v in body["providers"].items()
+                              if k in llm.PROVIDERS and isinstance(v, dict)}
+    user_config.update("llm", patch)
+    return jsonify(llm.public_config())
+
+
+@app.route("/api/llm/test", methods=["POST"])
+def api_llm_test():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(llm.test(body.get("provider")))
+    except llm.LLMError as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/llm/models")
+def api_llm_models():
+    try:
+        return jsonify({"models": llm.list_models(request.args.get("provider"))})
+    except llm.LLMError as e:
+        return jsonify({"models": [], "error": str(e)})
+
+
+@app.route("/api/llm/oauth/openrouter/start")
+def api_llm_openrouter_start():
+    cb = request.host_url.rstrip("/") + "/api/llm/oauth/openrouter/callback"
+    return jsonify({"url": llm.openrouter_auth_url(cb)})
+
+
+@app.route("/api/llm/oauth/openrouter/callback")
+def api_llm_openrouter_callback():
+    try:
+        llm.openrouter_exchange(request.args.get("code", ""))
+        user_config.update("llm", {"active": "openrouter"})
+        result = "ok"
+    except llm.LLMError as e:
+        logger.error(f"OpenRouter OAuth failed: {e}")
+        result = "failed"
+    return redirect(f"{DASHBOARD_URL}/settings?llm=openrouter&auth={result}")
+
+
+_CHAT_SYSTEM = (
+    "You are the analyst assistant inside an intraday NIFTY options paper/live trading dashboard. "
+    "You receive a JSON snapshot of the current scanner state and broker positions. "
+    "Explain signals, risk, regime and P&L concisely. You are advisory only: you cannot place, "
+    "modify or cancel orders, and you must never claim to have done so. Say so if data is missing; "
+    "do not invent prices. This is not financial advice."
+)
+
+
+def _chat_context() -> dict:
+    try:
+        bm = order_manager.to_dict()
+        return {
+            "now_ist": datetime.now().isoformat(timespec="seconds"),
+            "nifty_last_price": state.get("last_price"),
+            "regime": state.get("regime"),
+            "scanner_status": state.get("status"),
+            "suggestions": [
+                {k: sg.get(k) for k in ("symbol", "direction", "strategy", "final_score", "entry_price",
+                                        "sl", "target", "risk") if k in sg}
+                for sg in (state.get("trade_suggestions") or [])[:5]
+            ],
+            "broker": {k: bm.get(k) for k in ("mode", "broker", "connected", "halted", "halt_reason",
+                                              "daily_pnl", "trade_count", "max_daily_loss")},
+            "open_positions": bm.get("open_positions", [])[:5],
+        }
+    except Exception as e:
+        logger.warning(f"chat context failed: {e}")
+        return {}
+
+
+@app.route("/api/ai/chat", methods=["POST"])
+def api_ai_chat():
+    """body: {messages: [{role, content}], include_context?: bool}"""
+    body = request.get_json(force=True, silent=True) or {}
+    msgs = [{"role": m["role"], "content": str(m["content"])[:8000]}
+            for m in body.get("messages", [])[-20:]
+            if m.get("role") in ("user", "assistant") and m.get("content")]
+    if not msgs or msgs[-1]["role"] != "user":
+        return jsonify({"error": "messages must end with a user message"}), 400
+    system = _CHAT_SYSTEM
+    if body.get("include_context", True):
+        system += "\n\nCURRENT SNAPSHOT:\n" + json.dumps(_chat_context(), default=str)
+    try:
+        return jsonify(llm.chat(msgs, system=system, max_tokens=1024))
+    except llm.LLMError as e:
+        return jsonify({"error": str(e)}), 502
+
+
 if __name__ == "__main__":
     initialize()
 

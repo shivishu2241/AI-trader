@@ -408,3 +408,12 @@ MODEL_DIR=models/saved
     3. Micro-momentum confirmation (tick_momentum) — **continuation strategies only**
     4. Option-premium confirmation (Fix D) — **all strategies**, 30s window, 0.8% drop threshold
 - **Intra-trade regime exit**: `_tick_monitor_loop` has three tiers — 0.10% adverse NIFTY move (log), 0.20% (tighten SL to entry+2%), 0.30% (HARD EXIT if option is underwater). Check interval 10s.
+
+---
+
+## GUI-Configured LLM + Broker (Settings page)
+
+- Credentials entered in the dashboard are stored in `.user_config.json` (git-ignored, chmod 600) via `utils/user_config.py`. Secrets are masked in every API response; posting an empty/masked secret keeps the stored one. `.env` values remain a fallback.
+- **LLM** (`llm/client.py`, routes `/api/llm/*`, `POST /api/ai/chat`): OmniRoute (`http://localhost:20128/v1`), OpenRouter (API key or OAuth PKCE), Anthropic, OpenAI, Gemini, Ollama, any custom OpenAI-compatible URL. Chat is advisory only — it gets a state snapshot but has no order tools. Keep it that way.
+- **Brokers** (`/api/broker/config|test`, `OrderManager.set_mode`): `paper` | `zerodha` | `indmoney`. Switching to a live broker needs `confirm_live=true` and no open positions. Zerodha daily login redirects to `/api/broker/zerodha/callback`.
+- `broker/indmoney_adapter.py` endpoint paths / payload fields are **unverified** against the official INDstocks docs (configurable in the GUI). Verify and place a 1-lot test order before trusting it.

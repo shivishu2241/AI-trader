@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Sidebar from "@/components/Sidebar";
 import { fetchJSON, type RLStatus } from "@/lib/api";
+import AiChat from "@/components/AiChat";
 import { RefreshCw } from "lucide-react";
 
 export default function AIPage() {
@@ -34,6 +35,8 @@ export default function AIPage() {
             <RefreshCw className="w-3 h-3" /> REFRESH
           </button>
         </div>
+
+        <AiChat />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-[1px] mb-4">
           {/* Tabular RL agent */}

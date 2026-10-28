@@ -34,6 +34,8 @@ from broker.base_adapter import (
 )
 from broker.paper_adapter import PaperAdapter
 from broker.zerodha_adapter import ZerodhaAdapter
+from broker.indmoney_adapter import IndMoneyAdapter
+from utils import user_config
 from utils.logger import get_logger
 
 logger = get_logger("order_manager")
@@ -75,16 +77,14 @@ class OrderManager:
     """
 
     def __init__(self):
-        self._mode = os.getenv("TRADE_MODE", "paper").lower()
+        # GUI-selected mode (Settings → Broker) wins over the TRADE_MODE env var
+        self._mode = (user_config.get("broker").get("mode") or os.getenv("TRADE_MODE", "paper")).lower()
         self._max_daily_loss = float(os.getenv("MAX_DAILY_LOSS", "-5000"))
         self._max_concurrent = int(os.getenv("MAX_CONCURRENT_POSITIONS", "1"))
         self._confirmation_mode = os.getenv("ORDER_CONFIRMATION", "auto").lower()
 
         # Initialize the appropriate adapter
-        if self._mode == "zerodha":
-            self._adapter: BrokerAdapter = ZerodhaAdapter()
-        else:
-            self._adapter: BrokerAdapter = PaperAdapter()
+        self._adapter: BrokerAdapter = self._make_adapter(self._mode)
 
         # State
         self._positions: list[ManagedPosition] = []
@@ -98,6 +98,35 @@ class OrderManager:
         logger.info(f"OrderManager initialized: mode={self._mode}, "
                     f"max_loss=₹{self._max_daily_loss}, max_concurrent={self._max_concurrent}, "
                     f"confirmation={self._confirmation_mode}")
+
+    # ── Adapter selection ─────────────────────────────────────────────
+
+    BROKER_MODES = ("paper", "zerodha", "indmoney")
+
+    @staticmethod
+    def _make_adapter(mode: str) -> BrokerAdapter:
+        if mode == "zerodha":
+            return ZerodhaAdapter()
+        if mode == "indmoney":
+            return IndMoneyAdapter()
+        return PaperAdapter()
+
+    def set_mode(self, mode: str) -> dict:
+        """Switch broker at runtime (from the dashboard). Refuses while positions are open."""
+        mode = mode.lower()
+        if mode not in self.BROKER_MODES:
+            return {"ok": False, "error": f"Unknown broker '{mode}'"}
+        with self._lock:
+            if mode == self._mode:
+                return {"ok": True, "mode": mode, "changed": False}
+            if self.open_positions:
+                return {"ok": False, "error": "Close all open positions before switching broker."}
+            self._adapter = self._make_adapter(mode)
+            self._mode = mode
+            self._pending_signals = []
+        user_config.update("broker", {"mode": mode})
+        logger.warning(f"Broker switched to {mode}")
+        return {"ok": True, "mode": mode, "changed": True}
 
     # ── Properties ────────────────────────────────────────────────────
 

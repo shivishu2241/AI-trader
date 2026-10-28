@@ -25,3 +25,6 @@ backtest_results/
 
 # OS
 .DS_Store
+
+# GUI-managed credentials (LLM keys, broker tokens)
+.user_config.json

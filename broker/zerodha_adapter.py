@@ -39,6 +39,7 @@ from broker.base_adapter import (
     Position,
     ProductType,
 )
+from utils import user_config
 from utils.logger import get_logger
 
 logger = get_logger("zerodha_adapter")
@@ -70,12 +71,17 @@ class ZerodhaAdapter(BrokerAdapter):
     """
 
     def __init__(self):
-        self._api_key = os.getenv("ZERODHA_API_KEY", "")
-        self._api_secret = os.getenv("ZERODHA_API_SECRET", "")
-        self._access_token = os.getenv("ZERODHA_ACCESS_TOKEN", "")
-        self._user_id = os.getenv("ZERODHA_USER_ID", "")
         self._kite = None  # kiteconnect.KiteConnect instance
         self._connected = False
+        self._load_credentials()
+
+    def _load_credentials(self):
+        """GUI-saved credentials (Settings → Broker) win; .env is the fallback."""
+        cfg = user_config.get("zerodha")
+        self._api_key = cfg.get("api_key") or os.getenv("ZERODHA_API_KEY", "")
+        self._api_secret = cfg.get("api_secret") or os.getenv("ZERODHA_API_SECRET", "")
+        self._access_token = cfg.get("access_token") or os.getenv("ZERODHA_ACCESS_TOKEN", "")
+        self._user_id = os.getenv("ZERODHA_USER_ID", "")
 
     # ── Authentication ────────────────────────────────────────────────
 
@@ -87,8 +93,9 @@ class ZerodhaAdapter(BrokerAdapter):
         The access_token is typically obtained via the OAuth redirect
         callback at /api/broker/auth/callback.
         """
+        self._load_credentials()
         if not self._api_key:
-            logger.error("ZERODHA_API_KEY not set in .env")
+            logger.error("Zerodha API key not set (Settings → Broker)")
             return False
 
         try:
@@ -125,13 +132,14 @@ class ZerodhaAdapter(BrokerAdapter):
 
     def generate_login_url(self) -> str:
         """Return the Kite Connect login URL for OAuth2 flow."""
-        if self._kite is None:
+        self._load_credentials()
+        if self._kite is None and self._api_key:
             try:
                 from kiteconnect import KiteConnect
                 self._kite = KiteConnect(api_key=self._api_key)
             except ImportError:
                 return ""
-        return self._kite.login_url()
+        return self._kite.login_url() if self._kite else ""
 
     def complete_auth(self, request_token: str) -> bool:
         """
@@ -140,7 +148,10 @@ class ZerodhaAdapter(BrokerAdapter):
         Called by /api/broker/auth/callback when user completes login.
         """
         if self._kite is None:
-            logger.error("Kite not initialized — call authenticate() first")
+            self._load_credentials()
+            self.generate_login_url()  # initialises self._kite
+        if self._kite is None:
+            logger.error("Kite not initialized — is the API key set?")
             return False
         try:
             data = self._kite.generate_session(request_token, api_secret=self._api_secret)
@@ -150,6 +161,7 @@ class ZerodhaAdapter(BrokerAdapter):
             self._connected = True
             # Persist token to env so it survives restarts (until tomorrow 6am)
             os.environ["ZERODHA_ACCESS_TOKEN"] = self._access_token
+            user_config.update("zerodha", {"access_token": self._access_token})
             logger.info(f"Zerodha OAuth complete: user={self._user_id}, token set")
             return True
         except Exception as e:
