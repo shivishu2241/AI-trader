@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fetchJSON, postJSON } from "@/lib/api";
+import OfflineNotice from "@/components/OfflineNotice";
 
 interface Provider {
   label: string; help: string; oauth: boolean; needs_key: boolean;
@@ -17,10 +18,12 @@ export default function LlmSettings() {
   const [models, setModels] = useState<string[]>([]);
   const [msg, setMsg] = useState<Msg>(null);
   const [busy, setBusy] = useState(false);
+  const [offline, setOffline] = useState(false);
 
   const load = useCallback(async () => {
     const c = await fetchJSON<LlmConfig>("/api/llm/config").catch(() => null);
-    if (!c) { setMsg({ type: "err", text: "BACKEND OFFLINE" }); return; }
+    if (!c) { setOffline(true); return; }
+    setOffline(false);
     setCfg(c);
     setSel(s => s || c.active || "omniroute");
   }, []);
@@ -102,7 +105,7 @@ export default function LlmSettings() {
         Active: <span style={{ color: "#00e87b" }}>{cfg?.active ? cfg.providers[cfg.active]?.label : "none"}</span>
       </p>
 
-      {!cfg ? <div className="text-[11px]" style={{ color: "#3d4450" }}>LOADING...</div> : (
+      {!cfg ? (offline ? <OfflineNotice onRetry={load} /> : <div className="text-[11px]" style={{ color: "#3d4450" }}>LOADING...</div>) : (
         <>
           <div className="flex flex-wrap gap-[1px] mb-4">
             {Object.entries(cfg.providers).map(([id, pr]) => (

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fetchJSON, postJSON } from "@/lib/api";
+import OfflineNotice from "@/components/OfflineNotice";
 
 interface BrokerCfg {
   mode: string;
@@ -28,6 +29,7 @@ export default function BrokerSettings() {
   const [msg, setMsg] = useState<Msg>(null);
   const [busy, setBusy] = useState(false);
   const [adv, setAdv] = useState(false);
+  const [offline, setOffline] = useState(false);
 
   const apply = (c: BrokerCfg) => {
     setCfg(c);
@@ -38,7 +40,8 @@ export default function BrokerSettings() {
 
   const load = useCallback(async () => {
     const c = await fetchJSON<BrokerCfg>("/api/broker/config").catch(() => null);
-    if (!c) { setMsg({ type: "err", text: "BACKEND OFFLINE" }); return; }
+    if (!c) { setOffline(true); return; }
+    setOffline(false);
     apply(c);
     setTab(t => (t === "paper" && c.mode !== "paper" ? c.mode : t));
   }, []);
@@ -121,7 +124,7 @@ export default function BrokerSettings() {
         Choose where orders go. Credentials are stored on the backend and never shown again.
       </p>
 
-      {!cfg ? <div className="text-[11px]" style={{ color: "#3d4450" }}>LOADING...</div> : (
+      {!cfg ? (offline ? <OfflineNotice onRetry={load} /> : <div className="text-[11px]" style={{ color: "#3d4450" }}>LOADING...</div>) : (
         <>
           <div className="flex flex-wrap gap-[1px] mb-4">
             {BROKERS.map(b => (
