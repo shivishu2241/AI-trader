@@ -24,6 +24,13 @@ if [ ! -x .venv/bin/python ]; then
 fi
 source .venv/bin/activate
 
+# 1b. Python packages (requirements.txt had no Flask before — install if anything core is missing)
+if ! python -c "import flask, flask_cors, sqlalchemy, pandas, xgboost, requests" 2>/dev/null; then
+  echo "Installing Python packages (first run can take several minutes; torch is large)..."
+  if command -v uv >/dev/null 2>&1; then uv pip install -r requirements.txt; else pip install -r requirements.txt; fi \
+    || { echo "Package install failed. Make sure .venv uses Python 3.13 (not 3.14)."; exit 1; }
+fi
+
 # 2. Dashboard dependencies
 [ -d dashboard/node_modules ] || (echo "Installing dashboard packages..." && cd dashboard && npm install --no-audit --no-fund)
 

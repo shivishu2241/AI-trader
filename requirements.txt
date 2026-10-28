@@ -3,9 +3,14 @@ pandas>=2.0
 numpy>=1.24
 python-dotenv>=1.0
 
+# Backend API
+flask>=3.0
+flask-cors>=4.0
+
 # Database
 sqlalchemy>=2.0
 psycopg2-binary>=2.9
+psycopg[binary]>=3.1   # SQLAlchemy 2.1+ uses psycopg3 for postgresql:// URLs
 
 # ML
 scikit-learn>=1.3
