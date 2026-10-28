@@ -29,8 +29,20 @@ KITE_API_SECRET = os.getenv("KITE_API_SECRET", "")
 KITE_ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
 
 # ── TrueData ──────────────────────────────────────────────────────────────────
-TRUEDATA_USER = os.getenv("TRUEDATA_USER", "")
-TRUEDATA_PASSWORD = os.getenv("TRUEDATA_PASSWORD", "")
+def _gui_truedata() -> dict:
+    """Credentials saved from the dashboard (Settings → Market data). Read directly to avoid import cycles."""
+    import json
+    from pathlib import Path
+    try:
+        path = os.getenv("USER_CONFIG_PATH") or Path(__file__).resolve().parent.parent / ".user_config.json"
+        return json.loads(Path(path).read_text()).get("truedata", {})
+    except Exception:
+        return {}
+
+
+_td_gui = _gui_truedata()
+TRUEDATA_USER = _td_gui.get("user") or os.getenv("TRUEDATA_USER", "")
+TRUEDATA_PASSWORD = _td_gui.get("password") or os.getenv("TRUEDATA_PASSWORD", "")
 
 # TrueData API Endpoints
 TD_AUTH_URL = "https://auth.truedata.in/token"

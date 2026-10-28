@@ -5,6 +5,7 @@ import Sidebar from "@/components/Sidebar";
 import RiskProfileCard from "@/components/RiskProfileCard";
 import LlmSettings from "@/components/LlmSettings";
 import BrokerSettings from "@/components/BrokerSettings";
+import MarketDataSettings from "@/components/MarketDataSettings";
 import { fetchJSON, postJSON, type RiskProfile } from "@/lib/api";
 import { Play } from "lucide-react";
 
@@ -83,6 +84,7 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        <MarketDataSettings />
         <BrokerSettings />
         <LlmSettings />
 

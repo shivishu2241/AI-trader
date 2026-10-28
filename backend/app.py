@@ -113,6 +113,10 @@ def _live_broker_ready() -> tuple[bool, str]:
         return False, f"{order_manager.adapter.broker_name} is not connected. Open Settings → Broker and run Test Connection."
     if order_manager.is_halted:
         return False, f"Trading halted: {order_manager.halt_reason}"
+    from data import market_data as md
+    if not md.has_option_prices():
+        return False, ("Live orders are disabled with the free market-data source: it has no option prices, "
+                       "so stop-loss/target cannot be monitored. Use a real option feed (TrueData) for live trading.")
     return True, ""
 
 
@@ -648,6 +652,10 @@ def _backfill_ticks_if_stale():
     Throttled to once per minute (the scanner runs every 30s) — gaps don't
     appear that fast.
     """
+    from data import market_data as _md
+    if _md.get_source() != "truedata":
+        return  # REST backfills use TrueData; the free source syncs its own candles
+
     global _last_tick_backfill_run
     if not _is_market_hours():
         return
@@ -728,6 +736,10 @@ def _backfill_candles_if_stale():
        This handles the case where NIFTY moves significantly after market open
        and the new ATM strike was never subscribed by the tick collector.
     """
+    from data import market_data as _md
+    if _md.get_source() != "truedata":
+        return  # REST backfills use TrueData; the free source syncs its own candles
+
     if not _is_market_hours():
         return
     try:
@@ -2206,6 +2218,20 @@ def _ensure_collector():
     if now.weekday() >= 5 or not (9 <= now.hour < 16):
         return
 
+    # Market-data source (Settings → Market data): the free source has no tick collector.
+    from data import market_data as md
+    if md.get_source() == "yahoo":
+        _ensure_free_feed()
+        return
+    from config.settings import TRUEDATA_USER, TRUEDATA_PASSWORD
+    if not (TRUEDATA_USER and TRUEDATA_PASSWORD):
+        global _warned_no_truedata
+        if not _warned_no_truedata:
+            logger.warning("TrueData selected but no credentials set — tick collector not started. "
+                           "Add them (or pick the free source) in Settings → Market data.")
+            _warned_no_truedata = True
+        return
+
     # Price freshness is the single source of truth — check it first.
     # A process can be "running" but have a stalled WebSocket writing stale prices.
     if _cache_prices_are_fresh():
@@ -2229,6 +2255,100 @@ def _ensure_collector():
             stderr=subprocess.DEVNULL,
         )
         logger.info(f"collect_ticks.py started (PID={_collector_process.pid})")
+
+
+_warned_no_truedata = False
+_free_feed_thread = None
+
+
+def _free_feed_loop():
+    """Free-source live feed: index price into the shared cache every 15s, candles every 60s."""
+    from data import market_data as md
+    last_sync = 0.0
+    while True:
+        try:
+            if md.get_source() != "yahoo":
+                return                       # user switched source — let the thread end
+            if _is_market_hours() and datetime.now().weekday() < 5:
+                price = md.latest_price()
+                if price:
+                    md.write_live_price(price)
+                if time.time() - last_sync >= 60:
+                    md.sync_candles(days=1)
+                    last_sync = time.time()
+        except Exception as e:
+            logger.warning(f"Free feed error: {e}")
+        time.sleep(15)
+
+
+def _ensure_free_feed():
+    global _free_feed_thread
+    if _free_feed_thread is None or not _free_feed_thread.is_alive():
+        _free_feed_thread = threading.Thread(target=_free_feed_loop, daemon=True, name="free-feed")
+        _free_feed_thread.start()
+        logger.info("Free market-data feed started (Yahoo Finance, NIFTY index only)")
+
+
+# ── GUI: market-data source ────────────────────────────────────────────────
+
+def _market_data_status() -> dict:
+    from data import market_data as md
+    st = {"candles": 0, "first": None, "last": None, "db_error": None}
+    try:
+        df = read_sql("SELECT COUNT(*) AS n, MIN(timestamp) AS first, MAX(timestamp) AS last "
+                      "FROM minute_candles WHERE symbol = 'NIFTY-I'")
+        st.update(candles=int(df.iloc[0]["n"]), first=str(df.iloc[0]["first"]) if df.iloc[0]["n"] else None,
+                  last=str(df.iloc[0]["last"]) if df.iloc[0]["n"] else None)
+    except Exception as e:
+        st["db_error"] = str(e).splitlines()[0][:200]
+    cfg = user_config.get("market_data")
+    st.update(last_sync=cfg.get("last_sync"), feed_running=bool(_free_feed_thread and _free_feed_thread.is_alive()))
+    return st
+
+
+@app.route("/api/data/config", methods=["GET"])
+def api_data_config_get():
+    from data import market_data as md
+    td = user_config.masked("truedata")
+    return jsonify({
+        "source": md.get_source(),
+        "sources": {k: v["label"] for k, v in md.SOURCES.items()},
+        "truedata": {"user": td.get("user", ""), "password": td.get("password", "")},
+        "has_option_prices": md.has_option_prices(),
+        "status": _market_data_status(),
+    })
+
+
+@app.route("/api/data/config", methods=["POST"])
+def api_data_config_set():
+    from data import market_data as md
+    body = request.get_json(force=True, silent=True) or {}
+    restart_needed = False
+    if isinstance(body.get("truedata"), dict):
+        user_config.update("truedata", body["truedata"])
+        restart_needed = True               # credentials are read at process start
+    if body.get("source") in md.SOURCES:
+        user_config.update("market_data", {"source": body["source"]})
+        restart_needed = restart_needed or body["source"] == "truedata"
+    if md.get_source() == "yahoo" and _is_market_hours():
+        _ensure_free_feed()
+    resp = api_data_config_get().get_json()
+    resp["restart_needed"] = restart_needed
+    return jsonify(resp)
+
+
+@app.route("/api/data/sync", methods=["POST"])
+def api_data_sync():
+    """Download recent NIFTY 1-min candles from the free source into the database."""
+    from data import market_data as md
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify({"ok": True, **md.sync_candles(int(body.get("days", 7))), "status": _market_data_status()})
+    except md.MarketDataError as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    except Exception as e:
+        logger.exception("data sync failed")
+        return jsonify({"ok": False, "error": str(e).splitlines()[0][:300]}), 500
 
 
 @app.route("/api/paper/enter", methods=["POST"])
