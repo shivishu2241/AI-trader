@@ -30,15 +30,20 @@ def write_df(df: pd.DataFrame, table: str, if_exists: str = "append"):
     df.to_sql(table, engine, if_exists=if_exists, index=False, method="multi")
 
 
+_TABLES: dict = {}
+
+
 def upsert_candles(df: pd.DataFrame, table: str = "minute_candles"):
     """Insert candles, ignoring rows that already exist (by timestamp+symbol)."""
     if df.empty:
         return 0
     from sqlalchemy.dialects.postgresql import insert as pg_insert
-    from sqlalchemy import Table, MetaData
-    meta = MetaData()
-    meta.reflect(bind=engine, only=[table])
-    tbl = meta.tables[table]
+    from sqlalchemy import MetaData
+    tbl = _TABLES.get(table)
+    if tbl is None:                       # reflect once per process, not on every call
+        meta = MetaData()
+        meta.reflect(bind=engine, only=[table])
+        tbl = _TABLES[table] = meta.tables[table]
     rows = df.to_dict(orient="records")
     inserted = 0
     with engine.begin() as conn:

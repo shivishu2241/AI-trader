@@ -79,9 +79,23 @@ for i in $(seq 1 60); do
   [ "$i" = 60 ] && echo " still starting (check logs/backend.log)"
 done
 
-# 5. Dashboard
-echo "Starting dashboard → http://localhost:3000  (log: logs/dashboard.log)"
-(cd dashboard && exec npm run dev) >> logs/dashboard.log 2>&1 &
+# 5. Dashboard — production build is far faster/smoother than `next dev`; ./start.sh --dev for hot reload
+DASH_MODE="prod"; [ "${1:-}" = "--dev" ] && DASH_MODE="dev"
+if [ "$DASH_MODE" = "prod" ]; then
+  NEED_BUILD=0
+  if [ ! -f dashboard/.next/BUILD_ID ]; then NEED_BUILD=1
+  elif [ -n "$(find dashboard/app dashboard/components dashboard/contexts dashboard/lib dashboard/package.json \
+                 -type f -newer dashboard/.next/BUILD_ID 2>/dev/null | head -n1)" ]; then NEED_BUILD=1; fi
+  if [ "$NEED_BUILD" = "1" ]; then
+    echo "Building dashboard (one-time after updates, ~1-2 min; log: logs/dashboard_build.log)..."
+    (cd dashboard && npm run build) > logs/dashboard_build.log 2>&1 \
+      || { echo "  Build failed — falling back to dev mode (see logs/dashboard_build.log)"; DASH_MODE="dev"; }
+  fi
+fi
+echo "Starting dashboard ($DASH_MODE) → http://localhost:3000  (log: logs/dashboard.log)"
+if [ "$DASH_MODE" = "prod" ]; then (cd dashboard && exec npm run start) >> logs/dashboard.log 2>&1 &
+else (cd dashboard && exec npm run dev) >> logs/dashboard.log 2>&1 &
+fi
 PIDS+=($!)
 
 sleep 5

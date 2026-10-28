@@ -823,6 +823,20 @@ def _backfill_candles_if_stale():
         logger.warning(f"Backfill check failed: {e}")
 
 
+_featured_cache: dict = {"key": None, "df": None}
+
+
+def _featured_cached(df):
+    """compute_all_macro_indicators() is CPU-heavy and holds the GIL (slows every API call);
+    reuse the last result while the latest candle (time, close) and window size are unchanged."""
+    key = (str(df["timestamp"].iloc[-1]), float(df["close"].iloc[-1]), len(df))
+    if _featured_cache["key"] == key and _featured_cache["df"] is not None:
+        return _featured_cache["df"]
+    out = compute_all_macro_indicators(df)
+    _featured_cache.update(key=key, df=out)
+    return out
+
+
 def scan_market():
     """Run one scan cycle — compute features, check signals, score trades."""
     global state
@@ -868,8 +882,8 @@ def scan_market():
         df = df.sort_values("timestamp").reset_index(drop=True)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-        # Compute features
-        featured = compute_all_macro_indicators(df)
+        # Compute features (≈3 s for 58 indicators) — only when the candle data actually changed
+        featured = _featured_cached(df)
         if featured.empty:
             return
 
@@ -2262,41 +2276,67 @@ _warned_no_truedata = False
 _free_feed_thread = None
 
 
-def _free_feed_loop():
-    """Free-source live feed. yahoo: index price/candles. public: + NSE option chain (premiums)."""
+def _nse_feed_loop():
+    """NSE option-chain poller in its OWN thread (slow/blocked NSE must never stall anything else).
+    Polls every 30s; on failures backs off 30s → 60s → … → 5min so we don't hammer (and get banned by) NSE."""
     from data import market_data as md
     from data import nse_feed
-    last_sync = last_nse = 0.0
+    fails = 0
+    while md.get_source() == "public":
+        wait = 30
+        try:
+            if _is_market_hours() and datetime.now().weekday() < 5:
+                nse_feed.poll_once()
+                fails = 0
+        except Exception as e:
+            fails += 1
+            wait = min(30 * 2 ** (fails - 1), 300)
+            if fails in (1, 5) or fails % 20 == 0:        # don't spam the log
+                logger.warning(f"NSE feed (attempt {fails}, retry in {wait}s): {e}")
+        time.sleep(wait)
+
+
+def _free_feed_loop():
+    """Yahoo index feed: live price (yahoo-only mode) every 15s, small incremental candle sync every 60s."""
+    from data import market_data as md
+    last_sync = 0.0
+    try:
+        md.sync_candles(days=1)                  # catch up once at start
+        last_sync = time.time()
+    except Exception as e:
+        logger.warning(f"Free feed initial sync: {e}")
     while True:
         try:
             src = md.get_source()
             if src not in md.FREE_SOURCES:
                 return                       # user switched source — let the thread end
             if _is_market_hours() and datetime.now().weekday() < 5:
-                if src == "public" and time.time() - last_nse >= 30:
-                    last_nse = time.time()
-                    try:
-                        nse_feed.poll_once()
-                    except Exception as e:
-                        logger.warning(f"NSE feed: {e}")
                 if src == "yahoo":
                     price = md.latest_price()
                     if price:
                         md.write_live_price(price)
                 if time.time() - last_sync >= 60:
                     last_sync = time.time()
-                    md.sync_candles(days=1)
+                    md.sync_recent(45)
         except Exception as e:
             logger.warning(f"Free feed error: {e}")
-        time.sleep(5)
+        time.sleep(15)
+
+
+_nse_feed_thread = None
 
 
 def _ensure_free_feed():
-    global _free_feed_thread
+    global _free_feed_thread, _nse_feed_thread
+    from data import market_data as md
     if _free_feed_thread is None or not _free_feed_thread.is_alive():
         _free_feed_thread = threading.Thread(target=_free_feed_loop, daemon=True, name="free-feed")
         _free_feed_thread.start()
-        logger.info("Free market-data feed started (Yahoo Finance, NIFTY index only)")
+        logger.info("Free market-data feed started (Yahoo Finance NIFTY index)")
+    if md.get_source() == "public" and (_nse_feed_thread is None or not _nse_feed_thread.is_alive()):
+        _nse_feed_thread = threading.Thread(target=_nse_feed_loop, daemon=True, name="nse-feed")
+        _nse_feed_thread.start()
+        logger.info("NSE option-chain feed started (30s poll with backoff)")
 
 
 # ── GUI: market-data source ────────────────────────────────────────────────
@@ -2922,9 +2962,15 @@ def api_risk_profiles():
         return jsonify({"error": str(e)}), 500
 
 
+_rl_status_cache: dict = {"data": None, "at": 0.0}
+
+
 @app.route("/api/rl/status")
 def api_rl_status():
-    """Return RL / DQN agent status."""
+    """Return RL / DQN agent status (cached 30s: loading the model files on every poll is wasteful)."""
+    cached = _rl_status_cache
+    if cached["data"] is not None and time.time() - cached["at"] < 30:
+        return jsonify(cached["data"])
     result = {}
     # Tabular agent
     try:
@@ -2942,6 +2988,7 @@ def api_rl_status():
             result["dqn"] = dqn.policy_summary()
     except Exception:
         pass
+    cached.update(data=result, at=time.time())
     return jsonify(result)
 
 

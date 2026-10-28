@@ -135,10 +135,10 @@ def _with_db_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[["timestamp", "symbol", "open", "high", "low", "close", "volume", "vwap", "oi"]]
 
 
-def sync_candles(days: int = 7) -> dict:
-    """Download the last `days` (1–30) days of NIFTY 1-min candles into minute_candles."""
+def sync_candles(days: float = 7) -> dict:
+    """Download the last `days` (0.02–30; fractions allowed) of NIFTY 1-min candles into minute_candles."""
     from database.db import upsert_candles
-    days = max(1, min(int(days), 30))
+    days = max(0.02, min(float(days), 30))
     end = datetime.utcnow() + timedelta(minutes=1)
     start = end - timedelta(days=days)
     frames, cursor = [], start
@@ -155,9 +155,14 @@ def sync_candles(days: int = 7) -> dict:
     upsert_candles(_with_db_columns(df))
     user_config.update("market_data", {"last_sync": datetime.now().isoformat(timespec="seconds"),
                                        "last_sync_rows": int(len(df))})
-    logger.info(f"Synced {len(df)} NIFTY 1-min candles from Yahoo ({days}d)")
+    logger.info(f"Synced {len(df)} NIFTY 1-min candles from Yahoo ({days:g}d)")
     return {"fetched": int(len(df)), "first": str(df["timestamp"].iloc[0]),
             "last": str(df["timestamp"].iloc[-1]), "days": days}
+
+
+def sync_recent(minutes: int = 45) -> dict:
+    """Cheap incremental refresh used by the live feed (a few bars instead of a whole day)."""
+    return sync_candles(days=minutes / 1440)
 
 
 def latest_price() -> Optional[float]:

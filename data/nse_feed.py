@@ -29,7 +29,9 @@ from utils.logger import get_logger
 logger = get_logger("nse_feed")
 
 BASE = "https://www.nseindia.com"
-CHAIN_PATH = "/api/option-chain-indices"
+CHAIN_PATH = "/api/option-chain-indices"            # legacy endpoint
+CHAIN_V3_PATH = "/api/option-chain-v3"                # current endpoint (needs an expiry)
+CONTRACT_INFO_PATH = "/api/option-chain-contract-info"  # lists expiries
 IST = timezone(timedelta(hours=5, minutes=30))
 STRIKES_EACH_SIDE = 8          # ATM ± 8 strikes (50 pt gap) are kept
 _HEADERS = {
@@ -49,63 +51,104 @@ class NSEError(Exception):
     pass
 
 
+TIMEOUT = (5, 8)               # (connect, read) seconds — never block the feed thread for long
+
+
 class NSEClient:
     def __init__(self, base: str = BASE):
         self.base = base
         self.s = requests.Session()
         self.s.headers.update(_HEADERS)
         self._warmed_at = 0.0
+        self._expiries: list[date] = []
+        self._expiries_at = 0.0
 
     def _warm(self):
         """NSE only answers API calls that carry the cookies set by a normal page visit."""
         try:
-            self.s.get(self.base + "/option-chain", timeout=15)
+            self.s.get(self.base + "/option-chain", timeout=TIMEOUT)
         except requests.RequestException as e:
-            raise NSEError(f"Cannot reach nseindia.com: {e}") from e
+            raise NSEError(f"Cannot reach nseindia.com: {type(e).__name__}") from e
         self._warmed_at = time.time()
 
-    def option_chain(self, symbol: str = "NIFTY") -> dict:
-        if time.time() - self._warmed_at > 240:
-            self._warm()
+    def _get_json(self, path: str, params: dict) -> dict:
+        """GET with one cookie-refresh retry. Raises NSEError('HTTP <code>') when no JSON object comes back."""
+        last = "no response"
         for attempt in (1, 2):
+            if time.time() - self._warmed_at > 240 or attempt == 2:
+                self._warm()
             try:
-                r = self.s.get(self.base + CHAIN_PATH, params={"symbol": symbol}, timeout=15)
+                r = self.s.get(self.base + path, params=params, timeout=TIMEOUT)
             except requests.RequestException as e:
-                raise NSEError(f"Cannot reach nseindia.com: {e}") from e
+                raise NSEError(f"Cannot reach nseindia.com: {type(e).__name__}") from e
             body = r.text.strip()
-            if r.ok and body.startswith("{") and '"records"' in body:
+            if r.ok and body.startswith("{") and body != "{}":
                 return r.json()
-            if attempt == 1:
-                self._warm()            # stale/blocked cookies → refresh once and retry
-                continue
-            raise NSEError(f"NSE returned HTTP {r.status_code} without option-chain data "
-                           f"(blocked or rate-limited — try again later / another network).")
-        raise NSEError("unreachable")
+            last = f"HTTP {r.status_code}"
+        raise NSEError(last)
+
+    def _upcoming_expiries(self, symbol: str) -> list[date]:
+        if self._expiries and time.time() - self._expiries_at < 3600:
+            return self._expiries
+        info = self._get_json(CONTRACT_INFO_PATH, {"symbol": symbol})
+        exp = sorted({_parse_expiry(e) for e in info.get("expiryDates", [])})
+        self._expiries = [e for e in exp if e >= datetime.now(IST).date()]
+        self._expiries_at = time.time()
+        return self._expiries
+
+    def option_chain(self, symbol: str = "NIFTY") -> tuple[dict, Optional[date]]:
+        """Return (payload, expiry_hint). Tries NSE's current v3 endpoint, then the legacy one."""
+        tried = []
+        try:
+            exp = self._upcoming_expiries(symbol)
+            if exp:
+                payload = self._get_json(CHAIN_V3_PATH, {"type": "Indices", "symbol": symbol,
+                                                        "expiry": f"{exp[0]:%d-%b-%Y}"})
+                if (payload.get("records") or {}).get("data"):
+                    return payload, exp[0]
+                tried.append("v3: empty")
+            else:
+                tried.append("v3: no expiries")
+        except NSEError as e:
+            tried.append(f"v3: {e}")
+        try:
+            payload = self._get_json(CHAIN_PATH, {"symbol": symbol})
+            if (payload.get("records") or {}).get("data"):
+                return payload, None
+            tried.append("legacy: empty")
+        except NSEError as e:
+            tried.append(f"legacy: {e}")
+        raise NSEError("NSE gave no option chain (" + "; ".join(tried) + "). Blocked/rate-limited, or the endpoint changed.")
 
 
 def _parse_expiry(s: str) -> date:
     return datetime.strptime(s, "%d-%b-%Y").date()
 
 
-def parse_chain(payload: dict, today: Optional[date] = None) -> dict:
+def parse_chain(payload: dict, today: Optional[date] = None, expiry_hint: Optional[date] = None) -> dict:
     """NSE JSON → {underlying, timestamp, expiry, rows: DataFrame} for the nearest expiry."""
     today = today or datetime.now(IST).date()
     rec = payload.get("records") or {}
     data = rec.get("data") or []
     if not data:
         raise NSEError("NSE option chain was empty")
-    expiries = sorted({_parse_expiry(e) for e in rec.get("expiryDates", [])})
-    live = [e for e in expiries if e >= today]
-    if not live:
+    def _row_expiry(d: dict) -> Optional[date]:
+        raw = d.get("expiryDate") or d.get("expiryDates")
+        try:
+            return _parse_expiry(raw) if raw else None
+        except ValueError:
+            return None
+
+    listed = {_parse_expiry(e) for e in rec.get("expiryDates", [])} | {e for e in map(_row_expiry, data) if e}
+    live = sorted(e for e in listed if e >= today)
+    expiry = expiry_hint or (live[0] if live else None)
+    if expiry is None:
         raise NSEError("No upcoming NIFTY expiry in NSE data")
-    expiry = live[0]
     underlying = float(rec.get("underlyingValue") or 0)
     rows = []
     for d in data:
-        try:
-            if _parse_expiry(d["expiryDate"]) != expiry:
-                continue
-        except (KeyError, ValueError):
+        row_exp = _row_expiry(d)
+        if row_exp is not None and row_exp != expiry:
             continue
         strike = float(d["strikePrice"])
         for side in ("CE", "PE"):
@@ -166,7 +209,8 @@ def poll_once(write_db: bool = True) -> dict:
     from data.market_data import write_live_prices, DB_SYMBOL
     _client = _client or NSEClient()
     try:
-        chain = parse_chain(_client.option_chain("NIFTY"))
+        payload, hint = _client.option_chain("NIFTY")
+        chain = parse_chain(payload, expiry_hint=hint)
     except Exception as e:
         FEED_STATE.update(last_error=str(e)[:200])
         raise
