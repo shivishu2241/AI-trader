@@ -105,8 +105,38 @@ def _load_paper_trade_history():
                 logger.warning(f"Failed to load paper trade history ({mode}): {e}")
 
 
+def _live_broker_ready() -> tuple[bool, str]:
+    """True only if a live broker is selected, connected and not halted."""
+    if order_manager.mode == "paper":
+        return False, "No live broker selected. Choose Zerodha or INDmoney in Settings → Broker."
+    if not order_manager.adapter.is_connected:
+        return False, f"{order_manager.adapter.broker_name} is not connected. Open Settings → Broker and run Test Connection."
+    if order_manager.is_halted:
+        return False, f"Trading halted: {order_manager.halt_reason}"
+    return True, ""
+
+
+def _broker_exit_for_live_position(pos: dict):
+    """Close the real broker position that backs a dashboard 'live' position."""
+    oid = pos.get("broker_order_id")
+    if pos.get("mode") != "live" or not oid:
+        return
+    try:
+        res = order_manager.exit_position(oid, price=pos.get("exit_premium") or 0,
+                                          reason=pos.get("exit_reason") or "EXIT")
+    except Exception as e:
+        logger.exception("Broker exit raised")
+        res = {"action": "error", "reason": str(e)}
+    pos["broker_exit"] = res
+    if res.get("action") != "executed":
+        pos["broker_exit_failed"] = True
+        logger.error(f"!!! BROKER EXIT FAILED for {pos.get('symbol')} (order {oid}): {res.get('reason')} "
+                     f"— position may still be OPEN at the broker. Close it manually or use the kill switch.")
+
+
 def _persist_closed_trade(pos: dict):
     """Append a closed trade (with journey) to the JSONL file for its mode."""
+    _broker_exit_for_live_position(pos)
     mode = pos.get("mode", "test")
     _closed_trades_by_mode.setdefault(mode, []).append(pos)
     fpath = _paper_trades_file(mode)
@@ -2308,6 +2338,30 @@ def api_paper_enter():
         "exit_reason": None,
     }
     position["mode"] = trade_mode
+
+    if trade_mode == "live":
+        # Real money: place the order through the active broker BEFORE tracking the position.
+        ok, why = _live_broker_ready()
+        if not ok:
+            return jsonify({"error": why}), 409
+        # Safety cap for real orders (score-based sizing can reach 3 lots). Raise with LIVE_MAX_LOTS.
+        max_units = LOT_SIZE * max(1, int(os.getenv("LIVE_MAX_LOTS", "1")))
+        if position["lot_size"] > max_units:
+            logger.warning(f"LIVE size capped {position['lot_size']} → {max_units} units (LIVE_MAX_LOTS)")
+            position["lot_size"] = max_units
+        res = order_manager.submit_signal({
+            "symbol": symbol, "direction": direction, "strategy": strategy or "",
+            "entry_premium": ep, "sl_price": position["sl"], "target_price": position["target"],
+            "lots": position["lot_size"],            # order quantity in units
+            "final_score": final_score, "ml_prob": ml_prob,
+            "expiry": expiry or "", "index_price": index_price,
+        })
+        if res.get("action") != "executed":
+            return jsonify({"error": f"Broker did not execute the order: {res.get('reason')}"}), 409
+        position["broker_order_id"] = res["order_id"]
+        position["broker"] = order_manager.adapter.broker_name
+        logger.warning(f"LIVE ORDER PLACED via {position['broker']}: BUY {symbol} x{position['lot_size']} → {res['order_id']}")
+
     positions.append(position)
     logger.info(f"PAPER ENTER [{trade_mode}]: {direction} {symbol} @ ₹{ep} | SL={position['sl']} TGT={position['target']} | {lots} lot(s) (score={final_score:.3f})")
 

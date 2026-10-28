@@ -41,6 +41,17 @@ if command -v pg_isready >/dev/null 2>&1 && ! pg_isready -q; then
   sleep 2
 fi
 
+# 3b. Database login check — (re)configure role/password/database automatically if it fails
+if command -v pg_isready >/dev/null 2>&1 && ! python - <<'PY' 2>/dev/null
+from sqlalchemy import text
+from database.db import engine
+with engine.connect() as c: c.execute(text("select 1"))
+PY
+then
+  echo "Database login failed — running scripts/setup_db.sh (needs sudo)..."
+  ./scripts/setup_db.sh || echo "  (database setup failed — see messages above; the dashboard will run without data)"
+fi
+
 # 4. Backend
 echo "Starting backend  → http://localhost:5050   (log: logs/backend.log)"
 python backend/app.py >> logs/backend.log 2>&1 &

@@ -1,11 +1,13 @@
 "use client";
 
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { fetchJSON } from "@/lib/api";
 
 export type TradingMode = "test" | "live";
 
 interface TradingModeContextValue {
   mode: TradingMode;
+  brokerName: string;
   setMode: (mode: TradingMode) => void;
   dialogError: string | null;
   setDialogError: (msg: string | null) => void;
@@ -17,25 +19,31 @@ const TradingModeContext = createContext<TradingModeContextValue | null>(null);
 
 export function TradingModeProvider({ children }: { children: ReactNode }) {
   const [mode, setModeInternal] = useState<TradingMode>("test");
+  const [brokerName, setBrokerName] = useState("BROKER");
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [showDialog, setShowDialog] = useState(false);
 
   const setMode = useCallback((newMode: TradingMode) => {
-    if (newMode === "live") {
-      // Check for Zerodha keys
-      const apiKey = process.env.NEXT_PUBLIC_ZERODHA_API_KEY;
-      const apiSecret = process.env.NEXT_PUBLIC_ZERODHA_API_SECRET;
-      if (!apiKey || !apiSecret) {
-        setDialogError("ZERODHA API KEYS NOT CONFIGURED\n\nSet NEXT_PUBLIC_ZERODHA_API_KEY and NEXT_PUBLIC_ZERODHA_API_SECRET in your .env.local file to enable live trading.");
+    if (newMode !== "live") { setModeInternal(newMode); return; }
+    // Live mode needs a connected live broker configured in Settings → Broker (backend-side).
+    fetchJSON<{ mode: string; broker: string; connected: boolean; halted: boolean; halt_reason: string }>("/api/broker/status")
+      .then(b => {
+        let problem = "";
+        if (b.mode === "paper") problem = "NO LIVE BROKER SELECTED\n\nOpen Settings → Broker / Live Execution, enter your Zerodha or INDmoney credentials, test the connection and click GO LIVE.";
+        else if (!b.connected) problem = `${b.broker.toUpperCase()} NOT CONNECTED\n\nOpen Settings → Broker / Live Execution and run TEST CONNECTION (Zerodha tokens expire daily).`;
+        else if (b.halted) problem = `TRADING HALTED\n\n${b.halt_reason}`;
+        if (problem) { setDialogError(problem); setShowDialog(true); return; }
+        setBrokerName(b.broker);
+        setModeInternal("live");
+      })
+      .catch(() => {
+        setDialogError("BACKEND NOT REACHABLE\n\nStart the backend (./start.sh) and try again.");
         setShowDialog(true);
-        return;
-      }
-    }
-    setModeInternal(newMode);
+      });
   }, []);
 
   return (
-    <TradingModeContext.Provider value={{ mode, setMode, dialogError, setDialogError, showDialog, setShowDialog }}>
+    <TradingModeContext.Provider value={{ mode, brokerName, setMode, dialogError, setDialogError, showDialog, setShowDialog }}>
       {children}
     </TradingModeContext.Provider>
   );

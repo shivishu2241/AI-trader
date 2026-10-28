@@ -26,7 +26,7 @@ export default function Sidebar() {
   const [status, setStatus] = useState<string>("connecting");
   const [enabled, setEnabled] = useState<boolean>(true);
   const [toggling, setToggling] = useState(false);
-  const { mode, setMode } = useTradingMode();
+  const { mode, setMode, brokerName } = useTradingMode();
   const { show: onFullscreenPnl } = useFullscreenPnl();
 
   useEffect(() => {
@@ -129,7 +129,7 @@ export default function Sidebar() {
           </button>
         </div>
         <p className="text-[8px] mt-1.5 px-1" style={{ color: mode === "live" ? '#ff3e3e' : '#3d4450' }}>
-          {mode === "live" ? "⚠ REAL EXECUTIONS VIA ZERODHA" : "SIMULATED PAPER TRADES ONLY"}
+          {mode === "live" ? `⚠ REAL EXECUTIONS VIA ${brokerName.toUpperCase()}` : "SIMULATED PAPER TRADES ONLY"}
         </p>
       </div>
 

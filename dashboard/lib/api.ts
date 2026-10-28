@@ -39,7 +39,11 @@ export async function postJSON<T>(path: string, body?: object): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`API ${path} → ${res.status}`);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).error ?? ""; } catch { /* non-JSON error body */ }
+    throw new Error(detail || `API ${path} → ${res.status}`);
+  }
   return res.json();
 }
 

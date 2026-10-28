@@ -17,7 +17,7 @@ type JourneyData = { id: number; symbol: string; direction: string; entry_premiu
 import { useTradingMode } from "@/contexts/TradingModeContext";
 
 export default function LivePage() {
-  const { mode } = useTradingMode();
+  const { mode, brokerName } = useTradingMode();
   const [state, setState] = useState<LiveState | null>(null);
   const [scanning, setScanning] = useState(false);
   const [lastUpdate, setLastUpdate] = useState("--");
@@ -171,7 +171,7 @@ export default function LivePage() {
           <div>
             <h1 className="text-sm font-bold uppercase tracking-wider" style={{ color: '#00e87b' }}>Live Trading</h1>
             <p className="text-[10px] mt-0.5" style={{ color: mode === "live" ? '#ff3e3e' : '#3d4450' }}>
-              {mode === "live" ? "LIVE MODE — REAL ZERODHA EXECUTIONS" : "TEST MODE — SIMULATED PAPER ORDERS"}
+              {mode === "live" ? `LIVE MODE — REAL ${brokerName.toUpperCase()} EXECUTIONS` : "TEST MODE — SIMULATED PAPER ORDERS"}
             </p>
           </div>
           <div className="flex items-center gap-3">
